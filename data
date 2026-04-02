@@ -1,0 +1,334 @@
+# ============================================================
+# CRISP-DM - Projeto: Previsão de Cancelamento de Reservas
+# ============================================================
+
+# Fases 2 e 3 (Carregamento, Análise e Preparo de Dados)
+import pandas as pd
+import numpy as np
+import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+
+# Fase 4 (Modelagem)
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neural_network import MLPClassifier
+from sklearn import svm
+
+# Fase 5 (Avaliação)
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, roc_auc_score, confusion_matrix
+
+# Configurações
+sns.set(style="whitegrid")
+NOMEARQUIVO = "hotel_bookings.csv"
+NOMEMODELO = "modelo_cancelamento.pickle"
+
+# ============================================================
+# 1. Carregar dados (Fase 2)
+# ============================================================
+def carregarDados(nomeArquivo):
+    """Carrega o dataset a partir de um arquivo CSV."""
+    try:
+        dados = pd.read_csv(nomeArquivo, sep=",")
+        print(f" Dados carregados com sucesso. {len(dados)} registros.")
+        return dados
+    except Exception as e:
+        print(f" Erro ao carregar o arquivo: {e}")
+        return None
+
+# ============================================================
+# 2. Preparar os dados (Fase 3)
+# ============================================================
+def prepararDados(dados):
+    """Realiza o pré-processamento, tratamento de nulos, outliers e One-Hot Encoding."""
+
+    print("\n===== Informações Iniciais =====")
+    print(dados.info())
+
+    # 2.1. Tradução e Criação de Features
+    dados = dados.rename(columns={
+        "hotel": "hotel", "lead_time": "tempo_antecedencia", "is_repeated_guest": "hospede_repetido",
+        "previous_cancellations": "cancelamentos_previos", "previous_bookings_not_canceled": "reservas_previas_sem_cancelar",
+        "deposit_type": "tipo_deposito", "adr": "diaria_media", "is_canceled": "cancelado",
+        "stays_in_weekend_nights": "noites_fds", "stays_in_week_nights": "noites_semana",
+        "market_segment": "segmento_mercado"
+    })
+    dados["total_stay"] = dados["noites_fds"] + dados["noites_semana"]
+
+    # 2.2. Seleção de Features
+    colunas_uteis = [
+        "cancelado", "tipo_deposito", "tempo_antecedencia", "segmento_mercado", "hotel",
+        "hospede_repetido", "cancelamentos_previos", "reservas_previas_sem_cancelar",
+        "total_stay", "diaria_media"
+    ]
+    dados = dados[colunas_uteis].copy()
+
+    # 2.3. Tratamento de Nulos e Duplicados
+    dados.drop_duplicates(inplace=True)
+    # Remove nulos APÓS a seleção de colunas para evitar perda desnecessária de dados
+    dados.dropna(inplace=True) 
+    print(f" Dados após remoção de duplicados e nulos: {len(dados)} registros.")
+
+    # 2.4. Tratamento de Outliers (Com base no seu código original)
+    dados = dados[dados["tempo_antecedencia"].between(0, 365)]
+    dados = dados[dados["diaria_media"].between(0, 500)]
+    dados = dados[dados["total_stay"].between(0, 30)]
+    print(f" Dados após tratamento de outliers: {len(dados)} registros.")
+
+    # 2.5. One-Hot Encoding (Melhor Prática para Categóricas Nominais)
+    colunas_categoricas = ["tipo_deposito", "segmento_mercado", "hotel"]
+    dados = pd.get_dummies(dados, columns=colunas_categoricas, drop_first=True)
+    print(" One-Hot Encoding aplicado às colunas categóricas.")
+
+    print("\n===== Dados Após Tratamento Final =====")
+    print(dados.describe())
+    return dados
+
+# ============================================================
+# 3. Visualizar dados (Fase 3)
+# ============================================================
+def visualizarDados(dados):
+    """Gera e exibe gráficos de análise exploratória."""
+    print("\n Gerando gráficos de Análise Exploratória...")
+    
+    # Gráfico 1: Frequência de Cancelamento
+    plt.figure(figsize=(7,5))
+    dados['cancelado'].value_counts().plot(kind='bar')
+    plt.title("Frequência de Reservas Canceladas e Não Canceladas")
+    plt.xticks([0,1], ["Não Canceladas","Canceladas"], rotation=0)
+    plt.ylabel("Quantidade")
+    plt.tight_layout()
+    plt.show() 
+    
+    # Gráfico 2: Boxplot de Lead Time vs Cancelamento
+    plt.figure(figsize=(7,5))
+    sns.boxplot(x="cancelado", y="tempo_antecedencia", data=dados)
+    plt.xticks([0,1], ["Não Canceladas","Canceladas"])
+    plt.title("Lead Time (Tempo de Antecedência) vs Cancelamento")
+    plt.tight_layout()
+    plt.show()
+    
+    # Gráfico 3: Correlação (Exemplo)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(dados.corr(), annot=False, cmap='coolwarm')
+    plt.title('Mapa de Calor de Correlação')
+    plt.tight_layout()
+    plt.show()
+    
+    print(" Gráficos gerados. Feche as janelas para continuar.")
+
+# ============================================================
+# 4. Separar Treino / Teste / Validação (Fase 3)
+# ============================================================
+def separarDados(dados):
+    """Separa os dados em Treino (70%), Teste (15%) e Validação (15%)."""
+    print("\n Separando os dados em Treino (70%), Teste (15%) e Validação (15%)...")
+
+    Y = dados["cancelado"]
+    X = dados.drop(['cancelado'], axis=1)
+
+    # 1. Separa 70% Treino e 30% Temporário (Teste + Validação)
+    X_treino, X_temp, Y_treino, Y_temp = train_test_split(
+        X, Y, test_size=0.3, shuffle=True, random_state=42, stratify=Y
+    )
+
+    # 2. Separa o bloco Temporário (30%) em Teste (15%) e Validação (15%)
+    X_teste, X_validacao, Y_teste, Y_validacao = train_test_split(
+        X_temp, Y_temp, test_size=0.5, shuffle=True, random_state=42, stratify=Y_temp
+    )
+    
+    print(f"  - Treino: {len(X_treino)} registros")
+    print(f"  - Teste: {len(X_teste)} registros")
+    print(f"  - Validação: {len(X_validacao)} registros")
+    
+    # 3. Balanceamento (SMOTE) - Aplicado APENAS no conjunto de treino
+    print("\n Aplicando SMOTE no conjunto de Treino...")
+    smote = SMOTE(random_state=42)
+    X_treino_res, Y_treino_res = smote.fit_resample(X_treino, Y_treino)
+    
+    print(f"  - Treino Original: {len(X_treino)} -> Treino SMOTE: {len(X_treino_res)} registros")
+    print(" Separação e Balanceamento (SMOTE) concluídos.")
+
+    return X_treino_res, X_teste, X_validacao, Y_treino_res, Y_teste, Y_validacao
+
+# ============================================================
+# 5. Treinar Modelos (Fase 4)
+# ============================================================
+def treinarModelo(x_train, y_train):
+    """Treina uma lista de modelos de IA."""
+    listaModelos = []
+
+    # Modelos de IA (incluindo o LogisticRegression que estava comentado)
+    listaAlgoritmos = [
+        RandomForestClassifier(n_estimators=100, random_state=42),
+        LogisticRegression(max_iter=1000, random_state=42),
+        GaussianNB(),
+        svm.SVC(random_state=42),
+        GradientBoostingClassifier(n_estimators=100, random_state=42),
+        MLPClassifier(solver='adam', alpha=1e-5, hidden_layer_sizes=(15, 10), max_iter=1000, random_state=42)
+    ]
+
+    # Treinar modelos de IA
+    for algoritmo in listaAlgoritmos:
+        nome_algoritmo = algoritmo.__class__.__name__
+        print(f" Treinando modelo: {nome_algoritmo}...")
+        try:
+            algoritmo.fit(x_train, y_train)
+            listaModelos.append(algoritmo)
+            print(f" Treinamento de {nome_algoritmo} concluído.")
+        except Exception as e:
+            print(f" Erro ao treinar {nome_algoritmo}: {e}")
+            continue
+
+    return listaModelos
+
+# ============================================================
+# 6. Avaliar Modelos (Fase 5)
+# ============================================================
+def avaliarListaModelos(listaModelos, x_test, y_test):
+    """Avalia os modelos com métricas robustas e retorna o melhor."""
+    
+    resultados = []
+    
+    print("\n=====================================================")
+    print("        AVALIAÇÃO DOS MODELOS (Conjunto de Teste)    ")
+    print("=====================================================")
+
+    for modelo in listaModelos:
+        nome_algoritmo = modelo.__class__.__name__
+        y_pred = modelo.predict(x_test)
+        
+        # Tenta obter probabilidades para AUC-ROC. Se o modelo não suportar (ex: SVC padrão), usa decision_function
+        try:
+            y_proba = modelo.predict_proba(x_test)[:, 1]
+        except AttributeError:
+            try:
+                y_proba = modelo.decision_function(x_test)
+            except AttributeError:
+                y_proba = np.array([0] * len(y_test)) # Fallback
+            
+        # Garante que y_proba é um array para roc_auc_score
+        if not isinstance(y_proba, np.ndarray):
+             y_proba = np.array([0] * len(y_test))
+
+        acuracia = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
+        
+        # Calcula AUC-ROC apenas se o modelo suportar
+        auc_roc = roc_auc_score(y_test, y_proba) if np.any(y_proba) else 0.0
+        
+        resultados.append({
+            'Modelo': nome_algoritmo,
+            'Acurácia': acuracia,
+            'F1-Score': f1,
+            'Recall': recall,
+            'Precisão': precision,
+            'AUC-ROC': auc_roc
+        })
+        
+        print(f"--- {nome_algoritmo} ---")
+        print(f"Acurácia: {acuracia:.4f} | F1-Score: {f1:.4f} | Recall: {recall:.4f} | AUC-ROC: {auc_roc:.4f}")
+        
+    df_resultados = pd.DataFrame(resultados)
+    
+    # Encontrar o melhor modelo baseado no F1-Score (mais robusto para desbalanceamento)
+    melhor_modelo_idx = df_resultados['F1-Score'].idxmax()
+    melhor_modelo_info = df_resultados.loc[melhor_modelo_idx]
+    
+    print("\n=====================================================")
+    print(f" Melhor Modelo (Baseado no F1-Score): {melhor_modelo_info['Modelo']}")
+    print(f"F1-Score: {melhor_modelo_info['F1-Score']:.4f}")
+    print(f"Acurácia: {melhor_modelo_info['Acurácia']:.4f}")
+    print("=====================================================")
+
+    return listaModelos[melhor_modelo_idx]
+
+# ============================================================
+# 7. Salvar e Carregar Modelo (Fase 6)
+# ============================================================
+def salvarModelo(nomeArquivo, modelo):
+    """Salva o modelo treinado em disco."""
+    with open(nomeArquivo, 'wb') as file:
+        pickle.dump(modelo, file)
+    print(f"\n Modelo salvo como: {nomeArquivo}")
+
+def carregarModelo(nomeArquivo):
+    """Carrega o modelo treinado a partir do disco."""
+    modelo = None
+    try:
+        with open(nomeArquivo, 'rb') as file:
+            modelo = pickle.load(file)
+        print(f" Modelo carregado com sucesso: {nomeArquivo}")
+    except Exception as e:
+        print(f" Erro ao carregar o modelo: {e}")
+    return modelo
+
+# ============================================================
+# 8. Validação do Modelo (Fase 7 - Implantação/Uso)
+# ============================================================
+def validacaoModelo(modelo, x_validacao, y_validacao):
+    """Realiza a validação final no conjunto de validação e exibe a Matriz de Confusão."""
+    print("\n=====================================================")
+    print("        VALIDAÇÃO FINAL (Conjunto de Validação)      ")
+    print("=====================================================")
+    
+    y_pred = modelo.predict(x_validacao)
+    
+    # Imprime a lista de previsões
+    print("Previsões do Modelo (y_pred):")
+    # Limita a impressão para não poluir o terminal com milhares de valores
+    print(y_pred[:20], "...") 
+    
+    # Exibe a Matriz de Confusão
+    cm = confusion_matrix(y_validacao, y_pred)
+    print("\nMatriz de Confusão:")
+    print(cm)
+    
+    # Exibe métricas no conjunto de validação
+    acuracia = accuracy_score(y_validacao, y_pred)
+    f1 = f1_score(y_validacao, y_pred)
+    recall = recall_score(y_validacao, y_pred)
+    
+    print(f"\nResultados no Conjunto de Validação:")
+    print(f"Acurácia: {acuracia:.4f}")
+    print(f"F1-Score: {f1:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print("=====================================================")
+
+
+# ============================================================
+# EXECUÇÃO DO SISTEMA
+# ============================================================
+
+# 1. Carregar dados
+dados = carregarDados(NOMEARQUIVO)
+
+if dados is not None:
+
+    # 2. Tratamento de dados
+    dados = prepararDados(dados)
+
+    # 3. Visualizar dados (Feche as janelas para continuar)
+    visualizarDados(dados)
+
+    # 4. Separar os dados (Treino/Teste/Validação + SMOTE no Treino)
+    X_treino, X_teste, X_validacao, Y_treino, Y_teste, Y_validacao = separarDados(dados)
+
+    # 5. Treinar modelos
+    listaModelos = treinarModelo(X_treino, Y_treino)
+
+    # 6. Avaliar modelos (usando o conjunto de Teste)
+    modelo_final = avaliarListaModelos(listaModelos, X_teste, Y_teste)
+
+    # 7. Salvar modelo
+    salvarModelo(NOMEMODELO, modelo_final)
+
+    # 8. Carregar e Validar o modelo (usando o conjunto de Validação)
+    modeloCarregado = carregarModelo(NOMEMODELO)
+    if modeloCarregado:
+        validacaoModelo(modeloCarregado, X_validacao, Y_validacao)
